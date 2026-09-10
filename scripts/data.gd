@@ -16,13 +16,17 @@ extends RefCounted
 const FIELD_W := 1600.0
 const FIELD_H := 900.0
 
-const ACTIONS := ["advance", "charge", "hold", "flank", "seekCover", "regroup"]
+## `holdCover` is appended rather than slotted in beside `seekCover` so the
+## first six indices — and therefore every flat consideration offset in
+## `world.gd` and every diagnostic that reads them — keep their meaning.
+const ACTIONS := ["advance", "charge", "hold", "flank", "seekCover", "regroup", "holdCover"]
 const ADVANCE := 0
 const CHARGE := 1
 const HOLD := 2
 const FLANK := 3
 const SEEK_COVER := 4
 const REGROUP := 5
+const HOLD_COVER := 6
 
 ## The seven War Sim personality properties, in the order the UI shows them.
 const WAR_TRAITS := [

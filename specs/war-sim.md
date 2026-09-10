@@ -18,7 +18,7 @@ Repo: `nathandunn/war-sim` (public). Deploys to `war.precogsoftwareservices.com`
 | Sim rate | fixed 60 Hz, integer ticks, render decoupled |
 | Scale | 500+ actors, spatial hash broadphase, tick < 8 ms |
 | Determinism | one seed → one battle, bit-identical, in browser and in node |
-| Actors | dots. Team colour, unit id, facing tick. No sprites |
+| Actors | soldiers. Team colour, unit shade, pose and facing. Sprite-sheet MultiMesh (v0.2; v0.1 was chevrons) |
 | Reuse | `@precog/sim-core` (RNG, utility engine, personality schema), `@precog/agent-forge` (batch + sweep) |
 | No copy-paste | shared geometry/broadphase moves *into* sim-core; War Sim writes its own loop |
 
@@ -344,5 +344,5 @@ Deltas from the design above, all found by running it:
 
 ## 9c. Definition of done
 
-`war.precogsoftwareservices.com` live, both modes usable on a phone, 500 dots stable and
+`war.precogsoftwareservices.com` live, both modes usable on a phone, 500 soldiers stable and
 seed-deterministic, sliders visibly change outcomes, tests green, `apps.json` entry `live`.

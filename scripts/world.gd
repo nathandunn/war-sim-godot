@@ -47,6 +47,22 @@ const CHARGE_SPEED := 1.6
 const DECIDE_EVERY := 6             # staggered by actor id
 const DEFAULT_MAX_TICKS := SIM_HZ * 90
 const COVER_NEAR := 46.0            # a rect this close to the target is the target's cover
+const COVER_SEARCH := 220.0         # how far an actor will run for a rect
+const COVER_STAND := 4.0            # gap left between body and rect: stop *at* the edge
+##
+## How close the body has to be to a rect to count as in cover. Deliberately
+## tighter than COVER_NEAR, which is where the *ballistics* start giving the
+## target a bonus. `_pick_cover` stands an actor ACTOR_R + COVER_STAND out,
+## which leaves 12 units of slack for the shoving.
+##
+const COVER_HUG := 16.0
+const COVER_HIDDEN_Q := 0.80        # worth of a spot the threat cannot see at all
+const COVER_RESTLESS := 240.0       # ticks in cover before aggression starts winning
+const PEEK_CYCLE := 48              # one peek-and-shoot cycle, in ticks
+## The eight places you can stand against a rect: four faces, then four corners.
+const SPOT_X := [0.0, 1.0, 0.0, -1.0, 1.0, 1.0, -1.0, -1.0]
+const SPOT_Y := [-1.0, 0.0, 1.0, 0.0, -1.0, 1.0, 1.0, -1.0]
+const PICK_RECTS := 5               # how many nearby rects `_pick_cover` considers
 const COVER_SPREAD := 0.075         # extra 1 sigma at full grazing cover
 const MOVE_SPREAD := 1.7            # spread multiplier while moving
 const MIN_HIT_CHANCE := 0.55        # discipline scales this fire-control floor
@@ -147,6 +163,17 @@ static func cover_bonus(x0: float, y0: float, x1: float, y1: float,
 		if bonus > best:
 			best = bonus
 	return best
+
+
+##
+## Peek/fire cycle for an actor shooting from cover: is the window open this
+## tick? Discipline is fire control, so it buys window — Guards keep up nearly
+## continuous aimed fire from a wall, Militia spend most of the fight with their
+## heads down. Phase is per actor so a unit behind one rect does not fire in
+## unison, and it is a function of tick and id only: no RNG, no state.
+##
+static func peek_open(t: int, id: int, discipline: float) -> bool:
+	return float((t + id * 17) % PEEK_CYCLE) < float(PEEK_CYCLE) * (0.30 + 0.55 * discipline)
 
 
 ## Aim error, 1 sigma radians. Spread scales with actor randomness and movement.
@@ -256,6 +283,10 @@ var a_kills := PackedInt32Array()
 var a_melee_kills := PackedInt32Array()
 var a_alive_ticks := PackedInt32Array()
 var a_ticks_in_cover := PackedInt32Array()
+## Consecutive ticks spent covered — what aggression eventually overrides.
+var a_cover_ticks := PackedInt32Array()
+## Tick this actor died on, -1 while alive. Read only by the renderer.
+var a_death_tick := PackedInt32Array()
 
 var a_alive := PackedByteArray()
 var a_moving := PackedByteArray()
@@ -348,6 +379,11 @@ var _per_dist := 0.0
 var _per_visible := false
 var _per_unit_dist := 0.0
 var _per_in_cover := false
+## Distance to the nearest cover rect. Cover you cannot reach is not a plan.
+var _per_cover_dist := 0.0
+## `_pick_cover`'s nearest-rect selection, reused rather than reallocated.
+var _pick_i := PackedInt32Array()
+var _pick_d := PackedFloat64Array()
 ## Heading probes for `_step_actor`, reused rather than reallocated per call.
 var _angles := PackedFloat64Array([0.0, 0.0, 0.0, 0.0, 0.0])
 
@@ -363,8 +399,10 @@ func _init(opts: Dictionary) -> void:
 	seed_value = int(opts["seed"])
 	max_ticks = int(opts.get("max_ticks", DEFAULT_MAX_TICKS))
 	_rng = WarRng.new(seed_value)
-	_bases.resize(6)
-	_cons.resize(30)
+	_bases.resize(D.ACTIONS.size())
+	_cons.resize(D.ACTIONS.size() * UtilityEngine.TRAITS)
+	_pick_i.resize(PICK_RECTS)
+	_pick_d.resize(PICK_RECTS)
 	_dec_traits.resize(5)
 	_per_ids.resize(PERCEIVE_K)
 	_per_d2.resize(PERCEIVE_K)
@@ -456,6 +494,8 @@ func _spawn(defs: Array) -> void:
 				a_cover_y[id] = -1.0
 				a_moving[id] = 0
 				a_covered[id] = 0
+				a_cover_ticks[id] = 0
+				a_death_tick[id] = -1
 				var fr: float = _rng.next()
 				a_flank_sign[id] = 1 if fr < 0.5 else -1
 				var ar: float = _rng.next()
@@ -502,6 +542,8 @@ func _resize_actors(n: int) -> void:
 	a_shots.resize(n); a_hits.resize(n); a_kills.resize(n); a_melee_kills.resize(n)
 	a_alive_ticks.resize(n); a_ticks_in_cover.resize(n)
 	a_alive.resize(n); a_moving.resize(n); a_covered.resize(n)
+	a_cover_ticks.resize(n)
+	a_death_tick.resize(n)
 	_near_cover.resize(n * MAX_NEAR_COVER)
 	_near_count.resize(n)
 	_grow_bullets(256)
@@ -579,7 +621,7 @@ func _in_cover(id: int) -> bool:
 	var base := id * MAX_NEAR_COVER
 	var x := ax[id]
 	var y := ay[id]
-	var reach := ACTOR_R + 16.0
+	var reach := ACTOR_R + COVER_HUG
 	var reach2 := reach * reach
 	for k in range(cnt):
 		var i := _near_cover[base + k]
@@ -624,8 +666,15 @@ func step() -> void:
 		a_alive_ticks[id] += 1
 		var cov := _in_cover(id)
 		a_covered[id] = 1 if cov else 0
+		# Restlessness decays rather than resetting, or an actor that steps out
+		# of cover is instantly rested and steps straight back in. Bleeding it
+		# off over half the time it took to build is what turns "hug the nearest
+		# rect" into fire and movement: hold, get restless, cross, hold again.
 		if cov:
 			a_ticks_in_cover[id] += 1
+			a_cover_ticks[id] += 1
+		elif a_cover_ticks[id] > 0:
+			a_cover_ticks[id] = maxi(0, a_cover_ticks[id] - 2)
 		if a_under_fire[id] > 0:
 			a_under_fire[id] -= 1
 
@@ -765,6 +814,15 @@ func _perceive(id: int) -> void:
 	_per_visible = best_visible
 	_per_unit_dist = Geom.hyp(u_cx[u] - px, u_cy[u] - py)
 	_per_in_cover = a_covered[id] == 1
+	var cd := INF
+	var ci := 0
+	var cn := cover.size()
+	while ci < cn:
+		var cdist := Geom.rect_dist(px, py, cover[ci], cover[ci + 1], cover[ci + 2], cover[ci + 3])
+		if cdist < cd:
+			cd = cdist
+		ci += 4
+	_per_cover_dist = cd
 
 
 ## Top-K nearest living enemies inside `radius`, into `_per_ids` / `_per_d2`.
@@ -832,10 +890,38 @@ func _build_candidates(id: int, late: float) -> void:
 	var near := 1.0 - clampf(_per_dist / CHARGE_REACH, 0.0, 1.0)  # 1 = in charging distance
 	var hurt := 1.0 - a_hp[id] / MAX_HP
 	var strayed := clampf(_per_unit_dist / 260.0, 0.0, 1.0)
-	var uf := 1.0 if a_under_fire[id] > 0 else 0.0
+	##
+	## Cover-seeking is *caution x being shot at*, and both halves have to be
+	## real numbers rather than flags.
+	##
+	## `caution` lives in the base rather than as a consideration because a
+	## consideration multiplies a *trait*, and the only trait carrying this
+	## meaning is `risk` — whose weight can therefore only ever subtract. That
+	## is the whole reason no actor took cover: the disciplined, cohesive actor
+	## who should be hugging a wall is exactly the one whose traits push hardest
+	## into `hold` and `advance`, and low risk gave it nothing back.
+	##
+	## `fire` decays over UNDER_FIRE_TICKS instead of being a step. `threat`
+	## widens it to include simply being in the open with an enemy looking at
+	## you: measured on the JS build, actors are flagged `underFire` on barely
+	## 6% of their ticks, because fire control holds most shots — a cover model
+	## keyed only on that flag stays dormant through most of a battle, and
+	## nobody waits to be shot at before getting behind a wall.
+	##
+	## `reach` is 1 with a rect at arm's length and 0 with the nearest
+	## COVER_SEARCH away. Without it an actor caught in the open picks
+	## `seekCover` on the strength of its traits and then walks four hundred
+	## units to a wall under aimed fire.
+	##
+	var caution := 1.0 - a_risk[id]
+	var fire := clampf(float(a_under_fire[id]) / float(UNDER_FIRE_TICKS), 0.0, 1.0)
+	var exposed := (1.0 - dn) if _per_visible else 0.0
+	var threat := clampf(fire + 0.7 * exposed, 0.0, 1.0)
+	var restless := clampf(float(a_cover_ticks[id]) / COVER_RESTLESS, 0.0, 1.0)
+	var reach := 1.0 - clampf((_per_cover_dist - (ACTOR_R + COVER_HUG)) / COVER_SEARCH, 0.0, 1.0)
 
 	# advance — close to preferred range and fight there
-	_bases[0] = 0.20 + 0.45 * dn + late * 0.55
+	_bases[0] = 0.20 + 0.45 * dn + late * 0.55 - threat * caution * 0.45
 	_cons[0] = 0.40; _cons[1] = 0.05; _cons[2] = 0.15; _cons[3] = 0.0; _cons[4] = 0.0
 
 	# charge — only interesting once the enemy is genuinely close
@@ -843,23 +929,39 @@ func _build_candidates(id: int, late: float) -> void:
 	_cons[5] = 0.55 * near; _cons[6] = 0.2 * near; _cons[7] = 0.0
 	_cons[8] = -0.35; _cons[9] = 2.2 * near
 
-	# hold — stand and shoot the lane you already have
-	_bases[2] = 0.10 - 0.30 * dn + (0.20 if _per_visible else -0.55) + (0.15 if _per_in_cover else 0.0) - late * 0.5
+	# hold — stand and shoot the lane you already have. The in-cover bump has
+	# moved to holdCover, which is the action that actually keeps you there;
+	# standing in the open while rounds come past is now the penalised case.
+	_bases[2] = 0.10 - 0.30 * dn + (0.20 if _per_visible else -0.55) \
+		- (0.0 if _per_in_cover else threat * 0.35) - late * 0.5
 	_cons[10] = -0.40; _cons[11] = 0.0; _cons[12] = 0.0; _cons[13] = 0.85; _cons[14] = -0.2
 
 	# flank — arc around through open ground
 	_bases[3] = 0.16 - 0.10 * dn
 	_cons[15] = 0.10; _cons[16] = 0.70; _cons[17] = -0.45; _cons[18] = -0.20; _cons[19] = 0.0
 
-	# seekCover — high risk ignores cover entirely, low risk runs for it under fire
-	_bases[4] = -0.15 + uf * 0.45 + hurt * 0.30 + (-0.25 if _per_in_cover else 0.10) - late * 0.5
-	_cons[20] = -0.45; _cons[21] = -1.30 - 0.6 * uf; _cons[22] = 0.0
-	_cons[23] = 0.25; _cons[24] = -0.2
+	# seekCover — get to a rect. High risk still ignores cover entirely; low
+	# risk under fire now has a positive driver instead of a smaller penalty.
+	_bases[4] = -0.30 + caution * (0.45 + 2.10 * threat) * reach + hurt * 0.35 * reach \
+		+ (-1.10 if _per_in_cover else 0.15) - near * 0.15 \
+		- restless * a_aggression[id] * 0.6 - late * 0.55
+	_cons[20] = -0.50; _cons[21] = 0.0; _cons[22] = 0.0
+	_cons[23] = 0.30; _cons[24] = -0.30
 
 	# regroup — fall back on the unit
 	_bases[5] = -0.55 + strayed * 0.35
 	_cons[25] = -0.35; _cons[26] = -0.2; _cons[27] = 1.25 * strayed
 	_cons[28] = 0.1; _cons[29] = 0.0
+
+	# holdCover — stay in the rect you reached and fight from it. Worthless when
+	# not in cover, so it never competes for an actor in the open; `restless` is
+	# how aggression eventually breaks a man out of a hole, which is also what
+	# stops two cautious armies deadlocking behind walls.
+	_bases[6] = -0.85 + ((1.20 + caution * 0.45 + threat * 0.40) if _per_in_cover else 0.0) \
+		+ (0.12 if _per_visible else -0.15) \
+		- restless * a_aggression[id] * 0.6 - near * 0.35 - late * 0.6
+	_cons[30] = -0.45; _cons[31] = 0.0; _cons[32] = 0.0
+	_cons[33] = 0.55; _cons[34] = -0.35
 
 
 func _decide(id: int, late: float) -> void:
@@ -874,45 +976,132 @@ func _decide(id: int, late: float) -> void:
 	var prev := a_state[id]
 	a_state[id] = UtilityEngine.decide(
 		_bases, _cons, _dec_traits, a_randomness[id], _rng, prev, INERTIA)
-	if a_state[id] == D.SEEK_COVER:
+	# holdCover picks too: separation shoves and losses drift an actor off its
+	# spot, and without this it stands wherever it was pushed and calls it cover
+	if a_state[id] == D.SEEK_COVER or (a_state[id] == D.HOLD_COVER and a_covered[id] == 0):
 		_pick_cover(id, _per_target)
 
 
-## Nearest cover point that breaks line of sight from the threat.
+##
+## Where to stand against a rect, scored by the function that decides whether
+## the shot misses.
+##
+## Candidates are the four faces and four corners of each of the PICK_RECTS
+## nearest rects, pushed out by `ACTOR_R + COVER_STAND` so the actor stops *at*
+## the edge rather than on top of it (the old version offset by `max(w, h) / 2`,
+## which on a 60x200 wall is 81 units out in the open — half of all picks failed
+## the sim's own `_in_cover` test). Each is scored by `cover_bonus(threat ->
+## spot)`, so the position an actor chooses is by construction a position the
+## ballistics reward, with a floor of COVER_HIDDEN_Q for a spot the threat
+## cannot see at all.
+##
+## That floor is deliberately below what a good corner scores. A corner with a
+## grazing lane is worth ~0.9 *and you can shoot back*; hiding dead behind a
+## rect is total safety and total blindness.
+##
+## `a_cover_x` of -1 means "no cover worth crossing to from here": the actor
+## holds where it is rather than walking to its own feet.
+##
 func _pick_cover(id: int, threat: int) -> void:
 	var has_threat := threat >= 0
-	var tx: float = ax[threat] if has_threat else D.FIELD_W / 2.0
-	var ty: float = ay[threat] if has_threat else D.FIELD_H / 2.0
-	var bx := ax[id]
-	var by := ay[id]
-	var best := INF
+	var tx: float = ax[threat] if has_threat else _obj_x[a_team[id]]
+	var ty: float = ay[threat] if has_threat else _obj_y[a_team[id]]
+	var myx := ax[id]
+	var myy := ay[id]
+	var u := a_unit[id]
+	var lateral := float((id % 11) - 5) * (SEPARATION * 1.15)
+
+	# the PICK_RECTS nearest rects within reach, selected in place
+	var nn := 0
 	var n := cover.size()
 	var i := 0
 	while i < n:
-		var rx := cover[i]
-		var ry := cover[i + 1]
-		var rw := cover[i + 2]
-		var rh := cover[i + 3]
+		# open-coded rect_dist, as elsewhere on the hot paths: this runs for
+		# every rect on the map every time an actor decides to take cover
+		var qx := maxf(maxf(cover[i] - myx, 0.0), myx - (cover[i] + cover[i + 2]))
+		var qy := maxf(maxf(cover[i + 1] - myy, 0.0), myy - (cover[i + 1] + cover[i + 3]))
+		var d := sqrt(qx * qx + qy * qy)
+		if d <= COVER_SEARCH:
+			var lim := nn if nn < PICK_RECTS else PICK_RECTS
+			var slot := nn if nn < PICK_RECTS else -1
+			for k in range(lim):
+				if d < _pick_d[k]:
+					slot = k
+					break
+			if slot >= 0:
+				var j := (nn if nn < PICK_RECTS else PICK_RECTS - 1)
+				while j > slot:
+					_pick_d[j] = _pick_d[j - 1]
+					_pick_i[j] = _pick_i[j - 1]
+					j -= 1
+				_pick_d[slot] = d
+				_pick_i[slot] = i
+				if nn < PICK_RECTS:
+					nn += 1
 		i += 4
+
+	var bx := -1.0
+	var by := -1.0
+	var best := -INF
+	for r in range(nn):
+		var ri := _pick_i[r]
+		var rx := cover[ri]
+		var ry := cover[ri + 1]
+		var rw := cover[ri + 2]
+		var rh := cover[ri + 3]
 		var cx := rx + rw / 2.0
 		var cy := ry + rh / 2.0
-		var dx := cx - tx
-		var dy := cy - ty
-		var l := Geom.hyp(dx, dy)
-		if l == 0.0:
-			l = 1.0
-		dx /= l
-		dy /= l
-		var px := clampf(cx + dx * (maxf(rw, rh) / 2.0 + ACTOR_R + 5.0), ACTOR_R, D.FIELD_W - ACTOR_R)
-		var py := clampf(cy + dy * (maxf(rw, rh) / 2.0 + ACTOR_R + 5.0), ACTOR_R, D.FIELD_H - ACTOR_R)
-		var d := Geom.hyp(px - ax[id], py - ay[id])
-		var score := d
-		if has_threat and not _los_clear(px, py, tx, ty):
-			score -= 260.0
-		if score < best:
-			best = score
-			bx = px
-			by = py
+		var hw := rw / 2.0 + ACTOR_R + COVER_STAND
+		var hh := rh / 2.0 + ACTOR_R + COVER_STAND
+		for k in range(8):
+			var nx: float = SPOT_X[k]
+			var ny: float = SPOT_Y[k]
+			var sx := cx + nx * hw
+			var sy := cy + ny * hh
+			# Face anchors slide along the face by a per-actor amount. Without
+			# this every actor in the unit walks at the same eight points,
+			# arrives into a scrum, gets shoved back out by separation and sets
+			# off again — which measures as a company permanently *en route* to
+			# cover it is standing next to.
+			if nx == 0.0 or ny == 0.0:
+				var span := (rw / 2.0) if nx == 0.0 else (rh / 2.0)
+				var off := clampf(lateral, -span, span)
+				sx += -ny * off
+				sy += nx * off
+			var px := clampf(sx, ACTOR_R, D.FIELD_W - ACTOR_R)
+			var py := clampf(sy, ACTOR_R, D.FIELD_H - ACTOR_R)
+			# An unclamped spot sits ACTOR_R + COVER_STAND out from its own rect
+			# and every map keeps its rects ACTOR_R * 6 apart (asserted), so it
+			# cannot be inside another one. Clamping at the field edge can move
+			# it, and only then is the check worth its cost.
+			if px != sx or py != sy:
+				var free := true
+				var q := 0
+				while q < n:
+					var fx := maxf(maxf(cover[q] - px, 0.0), px - (cover[q] + cover[q + 2]))
+					var fy := maxf(maxf(cover[q + 1] - py, 0.0), py - (cover[q + 1] + cover[q + 3]))
+					if fx * fx + fy * fy < ACTOR_R2:
+						free = false
+						break
+					q += 4
+				if not free:
+					continue
+			var quality := cover_bonus(tx, ty, px, py, cover)
+			if quality < COVER_HIDDEN_Q and not _los_clear(px, py, tx, ty):
+				quality = COVER_HIDDEN_Q
+			# The last term is a fixed per-actor preference between rects.
+			# Nothing else distinguishes two equally good walls, so without it a
+			# company queues at whichever one is nearest its centroid and half of
+			# it spends the battle shuffling in the open behind the men who got
+			# there first.
+			var score := quality \
+				- 0.90 * clampf(Geom.hyp(px - myx, py - myy) / COVER_SEARCH, 0.0, 1.0) \
+				- a_cohesion[id] * 0.12 * clampf(Geom.hyp(px - u_cx[u], py - u_cy[u]) / 400.0, 0.0, 1.0) \
+				- float(int(id + int(rx)) % 5) * 0.045
+			if score > best:
+				best = score
+				bx = px
+				by = py
 	a_cover_x[id] = bx
 	a_cover_y[id] = by
 
@@ -952,10 +1141,18 @@ func _move(id: int) -> void:
 		dx = (-ddy / dist) * fs + (ddx / dist) * 0.35
 		dy = (ddx / dist) * fs + (ddy / dist) * 0.35
 	elif st == D.SEEK_COVER:
-		dx = a_cover_x[id] - myx
-		dy = a_cover_y[id] - myy
-		if sqrt(dx * dx + dy * dy) < 5.0:
-			dx = 0.0; dy = 0.0
+		if a_cover_x[id] >= 0.0:
+			dx = a_cover_x[id] - myx
+			dy = a_cover_y[id] - myy
+			if sqrt(dx * dx + dy * dy) < 5.0:
+				dx = 0.0; dy = 0.0
+	elif st == D.HOLD_COVER:
+		# stand still and fight; only move to recover a spot you were shoved off
+		if a_covered[id] == 0 and a_cover_x[id] >= 0.0:
+			dx = a_cover_x[id] - myx
+			dy = a_cover_y[id] - myy
+			if sqrt(dx * dx + dy * dy) < 5.0:
+				dx = 0.0; dy = 0.0
 	elif st == D.REGROUP:
 		dx = u_cx[u] - myx
 		dy = u_cy[u] - myy
@@ -963,8 +1160,11 @@ func _move(id: int) -> void:
 			dx = 0.0; dy = 0.0
 	# D.HOLD: stand still and shoot the lane you already have
 
-	# cohesion pull, on every state that is already moving
-	if (dx != 0.0 or dy != 0.0) and a_cohesion[id] > 0.0:
+	# Cohesion pull, on every state that is already moving — except the two
+	# cover states, where `_pick_cover` has already weighed the unit centroid and
+	# a second pull would drag the actor back off the rect it just chose.
+	if (dx != 0.0 or dy != 0.0) and a_cohesion[id] > 0.0 \
+			and st != D.SEEK_COVER and st != D.HOLD_COVER:
 		var ux := u_cx[u] - myx
 		var uy := u_cy[u] - myy
 		var ud := sqrt(ux * ux + uy * uy)
@@ -1205,6 +1405,7 @@ func _melee() -> void:
 func _kill(victim: int, killer: int, by_melee: bool) -> void:
 	a_alive[victim] = 0
 	a_hp[victim] = 0.0
+	a_death_tick[victim] = tick            # renderer only: how long to keep the body fresh
 	u_alive[a_unit[victim]] -= 1
 	team_alive[a_team[victim]] -= 1
 	if killer >= 0:
@@ -1220,6 +1421,11 @@ func _fire() -> void:
 			continue
 		if a_cooldown[id] > 0:
 			a_cooldown[id] -= 1
+			continue
+		# Head down between peeks. Before any RNG draw, like every other early
+		# out here, so the stream stays one draw per shot that needs one.
+		if a_state[id] == D.HOLD_COVER and a_covered[id] == 1 \
+				and not peek_open(tick, id, a_discipline[id]):
 			continue
 		var t := a_target[id]
 		if t < 0 or a_alive[t] == 0:

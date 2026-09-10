@@ -78,6 +78,7 @@ func _run_tests() -> void:
 	_test_determinism()
 	_test_batch_slicing()
 	_test_personality()
+	_test_cover_use()
 	_test_cover_capacity()
 	print("\n%d passed, %d failed" % [_pass, _fail])
 
@@ -261,6 +262,145 @@ func _test_personality() -> void:
 	_ok(hot > 0, "a melee-hungry unit reaches contact", "%d melee kills" % hot)
 	_ok(hot > cold * 3, "and does so far more than one that would rather shoot",
 		"%d vs %d" % [hot, cold])
+
+
+##
+## The cover fix, mirroring `war-sim`'s suite run for run — same presets, same
+## seeds, same tick caps, same measure. See `specs/war-sim-cover.md` there for
+## the diagnosis these replaced; the numbers below are the JS build's acceptance
+## bars, applied unchanged.
+##
+func _test_cover_use() -> void:
+	print("\ncover")
+
+	# risk decides whether an actor uses cover at all. Measured on cover
+	# *seeking*, not on proximity to a rect: `_step_actor` slides along rects,
+	# so on Ruins any unit advancing through the map brushes walls for much of
+	# the march, and that statistic reads the map rather than the personality.
+	for seed_value in [3, 9]:
+		var timid := _cover_seeking(0.05, seed_value)
+		var reckless := _cover_seeking(0.95, seed_value)
+		_ok(timid > 0.08, "seed %d: a low-risk unit spends real time on cover (%.1f%%)" % [seed_value, 100.0 * timid])
+		_ok(reckless < 0.02, "seed %d: a high-risk unit ignores cover (%.1f%%)" % [seed_value, 100.0 * reckless])
+		_ok(timid > reckless * 5.0, "seed %d: risk dominates the choice" % seed_value,
+			"%.3f vs %.3f" % [timid, reckless])
+
+	# the acceptance number: a low-risk unit under fire on Ruins ends at least
+	# 60% of its actor-ticks in cover, counting from the tick it first came
+	# under fire, and the berserkers it is fighting still ignore cover
+	for seed_value in [2, 3, 4]:
+		var r := _guards_under_fire(seed_value)
+		_ok(r[0] >= 0.6, "seed %d: guards under fire stay in cover (%.1f%%)" % [seed_value, 100.0 * r[0]])
+		_ok(r[1] < 0.05, "seed %d: berserkers still ignore cover (%.1f%%)" % [seed_value, 100.0 * r[1]])
+
+	# the spot an actor is sent to is itself cover, and not on top of the rect.
+	# Ridge is the map whose 60x200 walls broke the old max(w,h)/2 offset.
+	var m := D.map_by_id("ridge")
+	var rects: PackedFloat64Array = D.cover_of(m)
+	var w := World.new(opts("ridge", [
+		{"team": 0, "name": "A", "count": 50, "personality": D.preset("shock"), "weapon": D.WEAPONS["smg"]},
+		{"team": 1, "name": "B", "count": 50, "personality": D.preset("guards"), "weapon": D.WEAPONS["rifle"]},
+	], 6, 1200))
+	var picks := 0
+	var bad_far := 0
+	var bad_inside := 0
+	while not w.finished():
+		w.step()
+		for id in range(w.n_actors):
+			if w.a_alive[id] == 0 or w.a_state[id] != D.SEEK_COVER or w.a_cover_x[id] < 0.0:
+				continue
+			picks += 1
+			var hug := INF
+			var i := 0
+			while i < rects.size():
+				var d := Geom.rect_dist(w.a_cover_x[id], w.a_cover_y[id],
+					rects[i], rects[i + 1], rects[i + 2], rects[i + 3])
+				if d < hug:
+					hug = d
+				i += 4
+			if hug > World.ACTOR_R + World.COVER_HUG:
+				bad_far += 1
+			if hug < World.ACTOR_R - 1e-6:
+				bad_inside += 1
+	_ok(picks > 200, "the scenario produces cover picks", "%d" % picks)
+	_ok(bad_far == 0, "every cover point is itself in cover", "%d of %d were not" % [bad_far, picks])
+	_ok(bad_inside == 0, "no cover point is inside a rect", "%d of %d were" % [bad_inside, picks])
+
+	# discipline buys time out of cover: the peek window widens with it
+	var open_lo := _peek_share(0.0)
+	var open_mid := _peek_share(0.5)
+	var open_hi := _peek_share(1.0)
+	_ok(open_hi > open_mid and open_mid > open_lo, "the peek window widens with discipline",
+		"%.2f / %.2f / %.2f" % [open_lo, open_mid, open_hi])
+	_ok(open_lo > 0.2 and open_hi < 1.0, "even the panicky fire, even the disciplined duck")
+	var together := 0
+	for id in range(4):
+		if World.peek_open(0, id, 0.5):
+			together += 1
+	_ok(together > 0 and together < 4, "peek phase differs between actors")
+
+
+## Share of a unit's actor-ticks spent in a cover state.
+func _cover_seeking(risk: float, seed_value: int) -> float:
+	var units := [
+		{"team": 0, "name": "A", "count": 70,
+			"personality": _tweak("line", {"risk": risk, "discipline": 0.7}), "weapon": D.WEAPONS["rifle"]},
+		{"team": 1, "name": "B", "count": 70, "personality": D.preset("line"), "weapon": D.WEAPONS["rifle"]},
+	]
+	var w := World.new(opts("ruins", units, seed_value, 1500))
+	var ticks := 0
+	var seeking := 0
+	while not w.finished():
+		w.step()
+		for id in range(w.n_actors):
+			if w.a_alive[id] == 0 or w.a_team[id] != 0:
+				continue
+			ticks += 1
+			if w.a_state[id] == D.SEEK_COVER or w.a_state[id] == D.HOLD_COVER:
+				seeking += 1
+	return float(seeking) / float(maxi(ticks, 1))
+
+
+## [guards in cover after first being shot at, berserker cover-state share].
+func _guards_under_fire(seed_value: int) -> Array:
+	var units := [
+		{"team": 0, "name": "Berserkers", "count": 80,
+			"personality": D.preset("berserkers"), "weapon": D.WEAPONS["rifle"]},
+		{"team": 1, "name": "Guards", "count": 60,
+			"personality": D.preset("guards"), "weapon": D.WEAPONS["rifle"]},
+	]
+	var w := World.new(opts("ruins", units, seed_value, 3600))
+	var shot_at := {}
+	var post := 0
+	var covered := 0
+	var wild_ticks := 0
+	var wild_cover := 0
+	while not w.finished():
+		w.step()
+		for id in range(w.n_actors):
+			if w.a_alive[id] == 0:
+				continue
+			if w.a_team[id] == 0:
+				wild_ticks += 1
+				if w.a_state[id] == D.SEEK_COVER or w.a_state[id] == D.HOLD_COVER:
+					wild_cover += 1
+				continue
+			if w.a_under_fire[id] > 0:
+				shot_at[id] = true
+			if not shot_at.has(id):
+				continue
+			post += 1
+			if w.a_covered[id] == 1:
+				covered += 1
+	return [float(covered) / float(maxi(post, 1)), float(wild_cover) / float(maxi(wild_ticks, 1))]
+
+
+func _peek_share(discipline: float) -> float:
+	var open_ticks := 0
+	for t in range(World.PEEK_CYCLE * 4):
+		if World.peek_open(t, 0, discipline):
+			open_ticks += 1
+	return float(open_ticks) / float(World.PEEK_CYCLE * 4)
 
 
 ## Mean distance team 0's survivors still have to travel.

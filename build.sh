@@ -29,6 +29,17 @@ mkdir -p dist
 $GODOT --headless --import >/dev/null 2>&1 || true
 $GODOT --headless --export-release "Web" dist/index.html
 
+##
+## Boot the pack that was just written, headless, for 150 frames of the real
+## main scene. There is no browser on the build host, so this is the closest
+## thing to running the export: it proves the pack is complete and that every
+## script in it compiled, which is the failure this catches - a script that
+## parses in the project but was left out of, or mis-remapped in, the pack
+## fails at `engine.startGame` in the browser and nowhere else.
+##
+echo "verifying the exported pack…"
+$GODOT --headless --main-pack dist/index.pck --quit-after 150
+
 # pre-compress the big three; keep only the .gz
 for f in dist/index.wasm dist/index.js dist/index.pck; do
   [ -f "$f" ] || continue

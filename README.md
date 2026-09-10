@@ -86,3 +86,47 @@ where the two cannot agree bit for bit, and the one place the model differs.
 Behaviourally the two agree where the JS suite makes a testable claim:
 `test.sh` mirrors its personality assertions run for run — same presets, same
 seeds, same tick caps, same measure.
+
+### Measured against the JS build
+
+Six trials, Ruins, seeds 20260909-14, 125 Line + 125 Shock against 125 Guards +
+125 Skirmishers — the same configuration `specs/war-sim.md` reports on. Both
+implementations run headless.
+
+| | Godot | JS | |
+|---|---|---|---|
+| win rate B | 1.000 | 1.000 | same winner on every seed |
+| casualties A (mean) | 250.0 | 250.0 | A is wiped out either way |
+| casualties B (mean) | 91.7 | 81.7 | +12% |
+| time to decision (mean) | 1661 ticks | 1602 ticks | +4% |
+| hit rate | 0.574 | 0.559 | +3% |
+| melee kills / run | 14.8 | 15.8 | -6% |
+
+Individual seeds do not match — divergence 1 above guarantees they cannot — but
+they track: every seed resolves the same way, and the spread of tick counts
+overlaps. Comparable statistics, which was the goal; identical replays, which
+was never available.
+
+## Performance
+
+500 actors, mean over 400 ticks after a 200-tick warm-up, on the hub
+(t3.medium, 2 vCPU), `./test.sh --perf`:
+
+| map | mean | p50 | p95 |
+|---|---|---|---|
+| Open Field | 8.67 ms | 7.62 ms | 13.96 ms |
+| Ruins | 9.35 ms | 8.41 ms | 13.70 ms |
+| Ridge | 8.85 ms | 7.69 ms | 14.42 ms |
+
+Against a 16.67 ms budget at 60 Hz. The JS build measures 2.7-3.3 ms on the same
+host and the same configuration; the gap is the GDScript interpreter against a
+JIT, and closing it further would mean leaving GDScript.
+
+These are native numbers. **There is no browser on the build host, so the
+in-browser figure has not been measured** — WASM will be slower, by how much
+depends on the device. Two things are built in for that: the frame loop runs
+whole 60 Hz ticks from an accumulator with a hard cap of 4 catch-up ticks, so a
+slow device runs the battle in slow motion rather than diverging or spiralling;
+and the live stats line shows the actual ms/tick, so the real cost on the real
+device is on screen. Unit counts are sliders — halving the army roughly halves
+the tick.

@@ -1,0 +1,2 @@
+# The facing preview is documentation, not a game asset: keep it out of the
+# import scan so it never reaches the exported pack that every visitor downloads.

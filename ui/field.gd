@@ -19,6 +19,7 @@ extends Node2D
 ##
 
 const D := preload("res://scripts/data.gd")
+const Palette := preload("res://scripts/palette.gd")
 const ACTOR_R := 6.0
 ## Half-extent of a sheet cell, in logical units. Must match `sprites.gd`.
 const CELL_R := ACTOR_R * 2.6
@@ -36,16 +37,22 @@ const FLASH_TICKS := 3
 const LUNGE_TICKS := 10
 const MELEE_COOLDOWN := 26
 
-const TEAM_COLOR := [Color(0.35, 0.66, 1.0), Color(1.0, 0.48, 0.42)]
-const CORPSE_COLOR := Color(0.30, 0.32, 0.38, 0.9)
-const BULLET_COLOR := Color(1.0, 0.93, 0.66, 0.95)
-const FLASH_COLOR := [Color(1.0, 0.88, 0.62, 0.95), Color(0.78, 0.98, 1.0, 0.95)]
-const COVER_FILL := Color(0.137, 0.165, 0.22)
-const COVER_BAG := [Color(0.20, 0.239, 0.318), Color(0.169, 0.204, 0.267)]
-const COVER_TOP := Color(0.275, 0.325, 0.427)
-const COVER_FOOT := Color(0.102, 0.125, 0.161)
-const FIELD_FILL := Color(0.075, 0.083, 0.105)
-const SPAWN_TINT := [Color(0.35, 0.66, 1.0, 0.05), Color(1.0, 0.48, 0.42, 0.05)]
+##
+## Colour is `scripts/palette.gd` and only `scripts/palette.gd`. These are
+## aliases so the draw code below still reads in its own terms; there is no
+## literal `Color(...)` in this file and `_test_palette_contrast` fails on one.
+##
+const TEAM_COLOR := Palette.TEAM
+const CORPSE_COLOR := Palette.CORPSE
+const BULLET_COLOR := Palette.BULLET
+const FLASH_COLOR := Palette.FLASH
+const COVER_FILL := Palette.COVER_FILL
+const COVER_BAG := Palette.COVER_BAG
+const COVER_TOP := Palette.COVER_TOP
+const COVER_FOOT := Palette.COVER_FOOT
+const FIELD_FILL := Palette.FIELD
+const SPAWN_TINT := [Color(Palette.TEAM[0], Palette.SPAWN_ALPHA),
+	Color(Palette.TEAM[1], Palette.SPAWN_ALPHA)]
 ## Nominal sandbag width along a face, in logical units.
 const BAG := 13.0
 
@@ -57,7 +64,7 @@ var _am: MultiMesh
 var _bm: MultiMesh
 ## Per-unit shade, so a unit reads as a block rather than as loose dots.
 var _unit_color: PackedColorArray = PackedColorArray()
-var _custom := Color(0, 0, 0, 0)
+var _custom := Palette.TRANSPARENT
 
 
 func _ready() -> void:
@@ -129,7 +136,7 @@ func bind(world: RefCounted) -> void:
 		var n: int = maxi(count_team[team], 1)
 		var k: float = float(per_team[team]) / float(n)
 		per_team[team] += 1
-		_unit_color[u] = TEAM_COLOR[team].lerp(Color(1, 1, 1), k * 0.45)
+		_unit_color[u] = TEAM_COLOR[team].lerp(Palette.WHITE, k * 0.45)
 	_am.instance_count = world.n_actors
 	_bm.instance_count = maxi(world.n_actors * 2, 64)
 	queue_redraw()
@@ -192,7 +199,7 @@ func _draw() -> void:
 	while i < cover.size():
 		_draw_cover(Rect2(cover[i], cover[i + 1], cover[i + 2], cover[i + 3]))
 		i += 4
-	draw_rect(Rect2(0, 0, D.FIELD_W, D.FIELD_H), Color(0.22, 0.25, 0.31), false, 2.0)
+	draw_rect(Rect2(0, 0, D.FIELD_W, D.FIELD_H), Palette.BORDER, false, 2.0)
 
 
 ##

@@ -4,6 +4,12 @@ extends SceneTree
 ##
 ##   godot --headless --script res://scripts/sprites.gd
 ##   godot --headless --script res://scripts/sprites.gd -- --preview /tmp/x.png
+##   godot --headless --script res://scripts/sprites.gd -- --scene docs/palette-after.png
+##   godot --headless --script res://scripts/sprites.gd -- --legacy --scene docs/palette-before.png
+##
+## `--legacy` composites the same scene under the colours the app shipped with,
+## so the palette change has a before picture taken through the same lens as the
+## after one. It changes nothing about the sheet, which is luminance only.
 ##
 ## Nothing is imported from outside this repo and no drawing API is used: the
 ## sheet is composed analytically into an `Image`, one shape at a time,
@@ -28,10 +34,16 @@ const CELL := 64                  # cell size in pixels
 const POSES := ["stand", "crouch", "lunge", "ragdoll", "corpse"]
 const SS := 4                     # supersampling factor per axis
 
-const BODY := 0.72
-const HEAD := 1.0
+const Palette := preload("res://scripts/palette.gd")
+
+## The sheet's luminance levels. `scripts/palette.gd` owns them because the
+## contrast bar is stated against the *body*, not against the team colour — a
+## torso is 0.72 of the tint and checking the tint alone would pass a sprite
+## whose body fails.
+const BODY := Palette.LUM_BODY
+const HEAD := Palette.LUM_HELMET
 const WEAPON := 0.15
-const LIMB := 0.45
+const LIMB := Palette.LUM_LIMB
 ## Drawn *under* a shape, one notch larger, to separate it from whatever it
 ## overlaps. Nearly black, so on the field's near-black background it costs
 ## nothing at the silhouette's outer edge and does all its work between the
@@ -39,8 +51,45 @@ const LIMB := 0.45
 ## between a man and a blob.
 const OUTLINE := 0.06
 
+## The pre-2026-09-11 colours, kept only so `--legacy` can draw the before shot:
+## a near-black field, slate-blue sandbags on it, and an ember/cyan pair.
+const LEGACY := {
+	"field": Color(0.051, 0.063, 0.09),
+	"grid": Color(0.078, 0.098, 0.141),
+	"team": [Color(0.98, 0.55, 0.32), Color(0.36, 0.84, 0.90)],
+	"dead": Color(0.26, 0.28, 0.34),
+	"cover_fill": Color(0.137, 0.165, 0.22),
+	"cover_bag": [Color(0.20, 0.239, 0.318), Color(0.169, 0.204, 0.267)],
+	"cover_top": Color(0.275, 0.325, 0.427),
+	"cover_foot": Color(0.102, 0.125, 0.161),
+}
+
+var _legacy := false
 var _lum := PackedFloat32Array()
 var _cov := PackedFloat32Array()
+
+
+## A palette entry, or its pre-2026-09-11 counterpart under `--legacy`.
+func _c(key: String) -> Color:
+	if _legacy:
+		return LEGACY[key]
+	match key:
+		"field": return Palette.FIELD
+		"grid": return Palette.GRID
+		"dead": return Palette.CORPSE
+		"cover_fill": return Palette.COVER_FILL
+		"cover_top": return Palette.COVER_TOP
+		"cover_foot": return Palette.COVER_FOOT
+	push_error("no palette entry %s" % key)
+	return Palette.WHITE
+
+
+func _team(i: int) -> Color:
+	return LEGACY["team"][i] if _legacy else Palette.TEAM[i]
+
+
+func _bag(i: int) -> Color:
+	return LEGACY["cover_bag"][i] if _legacy else Palette.COVER_BAG[i]
 
 
 func _initialize() -> void:
@@ -49,6 +98,9 @@ func _initialize() -> void:
 	var out := "res://assets/soldiers.png"
 	var err := img.save_png(ProjectSettings.globalize_path(out))
 	print("wrote %s  %dx%d  (%s)" % [out, img.get_width(), img.get_height(), error_string(err)])
+	for i in range(args.size()):
+		if args[i] == "--legacy":
+			_legacy = true
 	for i in range(args.size()):
 		if args[i] == "--preview" and i + 1 < args.size():
 			_preview(img, args[i + 1])
@@ -61,7 +113,7 @@ func _initialize() -> void:
 func _sheet() -> Image:
 	var w := CELL * POSES.size()
 	var img := Image.create(w, CELL, false, Image.FORMAT_RGBA8)
-	img.fill(Color(0, 0, 0, 0))
+	img.fill(Palette.TRANSPARENT)
 	for p in range(POSES.size()):
 		_begin()
 		_pose(p)
@@ -261,10 +313,10 @@ func _preview(sheet: Image, path: String) -> void:
 	# body inside a 31-unit cell, at about 1.5 device pixels per unit) and the
 	# rest is for looking at the shapes.
 	var rows := [
-		{"zoom": 1, "tint": Color(1.0, 0.55, 0.32)},
-		{"zoom": 2, "tint": Color(0.36, 0.86, 0.90)},
-		{"zoom": 5, "tint": Color(1.0, 0.55, 0.32)},
-		{"zoom": 5, "tint": Color(0.30, 0.32, 0.38)},
+		{"zoom": 1, "tint": _team(0)},
+		{"zoom": 2, "tint": _team(1)},
+		{"zoom": 5, "tint": _team(0)},
+		{"zoom": 5, "tint": _c("dead")},
 	]
 	var w := 0
 	var h := 0
@@ -272,7 +324,7 @@ func _preview(sheet: Image, path: String) -> void:
 		w = maxi(w, CELL * POSES.size() * int(r["zoom"]))
 		h += CELL * int(r["zoom"])
 	var out := Image.create(w, h, false, Image.FORMAT_RGBA8)
-	out.fill(Color(0.051, 0.063, 0.09, 1.0))
+	out.fill(Color(_c("field"), 1.0))
 	var oy := 0
 	for r in rows:
 		var zoom := int(r["zoom"])
@@ -305,14 +357,14 @@ func _scene(sheet: Image, path: String) -> void:
 	var w := 520
 	var h := 300
 	var img := Image.create(int(w * px), int(h * px), false, Image.FORMAT_RGBA8)
-	img.fill(Color(0.051, 0.063, 0.09, 1.0))
+	img.fill(Color(_c("field"), 1.0))
 	_scene_grid(img, px, w, h)
 	_scene_cover(img, px, Rect2(120, 60, 150, 70))
 	_scene_cover(img, px, Rect2(120, 190, 150, 70))
 
-	var orange := Color(0.98, 0.55, 0.32)
-	var cyan := Color(0.36, 0.84, 0.90)
-	var dead := Color(0.26, 0.28, 0.34)
+	var orange: Color = _team(0)
+	var cyan: Color = _team(1)
+	var dead: Color = _c("dead")
 	# crouched along the far face of the top wall, facing right
 	for i in range(6):
 		_scene_actor(img, sheet, px, 1, Vector2(132.0 + i * 26.0, 46.0), -0.15 + i * 0.05, cyan)
@@ -332,7 +384,7 @@ func _scene(sheet: Image, path: String) -> void:
 
 
 func _scene_grid(img: Image, px: float, w: int, h: int) -> void:
-	var c := Color(0.078, 0.098, 0.141, 1.0)
+	var c := Color(_c("grid"), 1.0)
 	var x := 0
 	while x < w:
 		for y in range(img.get_height()):
@@ -348,7 +400,7 @@ func _scene_grid(img: Image, px: float, w: int, h: int) -> void:
 ## The same sandbag wall both renderers draw: a slab, a run of bags along each
 ## face, a lit top edge and a shadowed bottom one.
 func _scene_cover(img: Image, px: float, r: Rect2) -> void:
-	_fill_rect(img, px, r, Color(0.137, 0.165, 0.22, 1.0))
+	_fill_rect(img, px, r, Color(_c("cover_fill"), 1.0))
 	var bag := 13.0
 	for face in range(4):
 		var horizontal := face < 2
@@ -359,11 +411,11 @@ func _scene_cover(img: Image, px: float, r: Rect2) -> void:
 			var t: float = (r.position.x if horizontal else r.position.y) + (float(i) + 0.5) * step
 			var cx: float = t if horizontal else (r.position.x if face == 2 else r.position.x + r.size.x)
 			var cy: float = (r.position.y if face == 0 else r.position.y + r.size.y) if horizontal else t
-			var col := Color(0.20, 0.239, 0.318, 1.0) if i % 2 == 0 else Color(0.169, 0.204, 0.267, 1.0)
+			var col := Color(_bag(0), 1.0) if i % 2 == 0 else Color(_bag(1), 1.0)
 			_fill_ellipse(img, px, Vector2(cx, cy),
 				Vector2(step * 0.56, 6.5) if horizontal else Vector2(6.5, step * 0.56), col)
-	_fill_rect(img, px, Rect2(r.position.x, r.position.y - 2.0, r.size.x, 2.0), Color(0.275, 0.325, 0.427, 1.0))
-	_fill_rect(img, px, Rect2(r.position.x, r.position.y + r.size.y, r.size.x, 1.6), Color(0.102, 0.125, 0.161, 1.0))
+	_fill_rect(img, px, Rect2(r.position.x, r.position.y - 2.0, r.size.x, 2.0), Color(_c("cover_top"), 1.0))
+	_fill_rect(img, px, Rect2(r.position.x, r.position.y + r.size.y, r.size.x, 1.6), Color(_c("cover_foot"), 1.0))
 
 
 func _fill_rect(img: Image, px: float, r: Rect2, c: Color) -> void:

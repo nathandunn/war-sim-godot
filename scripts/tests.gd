@@ -16,6 +16,8 @@ const Batch := preload("res://scripts/batch.gd")
 const Geom := preload("res://scripts/geom.gd")
 const WarRng := preload("res://scripts/rng.gd")
 const D := preload("res://scripts/data.gd")
+const Palette := preload("res://scripts/palette.gd")
+const Field := preload("res://ui/field.gd")
 
 var _pass := 0
 var _fail := 0
@@ -80,7 +82,64 @@ func _run_tests() -> void:
 	_test_personality()
 	_test_cover_use()
 	_test_cover_capacity()
+	_test_palette_contrast()
 	print("\n%d passed, %d failed" % [_pass, _fail])
+
+
+##
+## Legibility, as a number.
+##
+## Every element a viewer has to pick out clears **WCAG 3:1** against the field
+## — the bar for non-text graphical objects. The soldier rows are the ones that
+## are easy to get wrong: a sprite is drawn from a luminance sheet and the team
+## colour is multiplied in, so a torso is only `LUM_BODY` of the team colour.
+## Checking the team colour alone would pass a sprite whose body fails, which is
+## exactly what the pre-2026-09-11 palette did — ember and cyan both looked fine
+## as swatches and both sank into the near-black field as men.
+##
+func _test_palette_contrast() -> void:
+	print("\npalette (WCAG contrast against the field)")
+	var bar := 3.0
+	var ground := Palette.FIELD
+	for e: Array in [
+			["team A helmet", Palette.at_luminance(Palette.TEAM[0], Palette.LUM_HELMET)],
+			["team A body", Palette.at_luminance(Palette.TEAM[0], Palette.LUM_BODY)],
+			["team B helmet", Palette.at_luminance(Palette.TEAM[1], Palette.LUM_HELMET)],
+			["team B body", Palette.at_luminance(Palette.TEAM[1], Palette.LUM_BODY)],
+			["corpse", Palette.CORPSE],
+			["sandbag", Palette.COVER_BAG[0]], ["sandbag alt", Palette.COVER_BAG[1]],
+			["cover slab", Palette.COVER_FILL], ["cover top", Palette.COVER_TOP],
+			["bullet", Palette.BULLET]]:
+		var k: float = Palette.contrast(e[1], ground)
+		_ok(k >= bar, "%s is %.2f:1 against the field (bar %.1f)" % [e[0], k, bar])
+
+	# the two teams separate on hue, not on luminance, and that is deliberate:
+	# blue against warm red is the colour-blind-safe opposition, and equal
+	# luminance stops either side reading as the heavier
+	var la := Palette.luminance(Palette.TEAM[0])
+	var lb := Palette.luminance(Palette.TEAM[1])
+	_ok(absf(la - lb) < 0.06, "neither team is the brighter (%.3f vs %.3f)" % [la, lb])
+	_ok(Palette.TEAM[0].h < 0.10 or Palette.TEAM[0].h > 0.92, "team A is red")
+	_ok(Palette.TEAM[1].h > 0.5 and Palette.TEAM[1].h < 0.72, "team B is blue")
+
+	# the sheet's luminance levels are the palette's, not a second copy
+	var src := FileAccess.get_file_as_string("res://scripts/sprites.gd")
+	_ok(src.contains("Palette.LUM_BODY"), "sprites.gd takes its body level from the palette")
+
+	# and the constants file is the only place a colour is named
+	var re := RegEx.create_from_string("Color\\(\\s*[0-9]")
+	for f: String in ["ui/field.gd", "ui/main.gd", "scripts/sprites.gd"]:
+		var body := FileAccess.get_file_as_string("res://" + f)
+		# the archived pre-2026-09-11 palette in sprites.gd is the one exception:
+		# it exists so `--legacy` can draw the before picture
+		var legacy := body.find("const LEGACY := {")
+		var legacy_end := body.find("}", legacy) if legacy >= 0 else -1
+		var hits := []
+		for m in re.search_all(body):
+			if legacy >= 0 and m.get_start() > legacy and m.get_start() < legacy_end:
+				continue
+			hits.push_back(body.count("\n", 0, m.get_start()) + 1)
+		_ok(hits.is_empty(), "%s has no literal colours (lines %s)" % [f, str(hits)])
 
 
 ##

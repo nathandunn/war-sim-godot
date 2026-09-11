@@ -61,11 +61,54 @@ The sheet stores luminance rather than colour - body 0.72, helmet 1.0, weapon
 every unit shade and the corpse tint, and the rifle stays dark under all of
 them. Cover rects are drawn as sandbag emplacements with a lit top edge.
 
+### Colour
+
+Reworked 2026-09-11, after a phone report that the sim apps were unreadable in
+daylight. The whole palette is `scripts/palette.gd` and nothing else may name a
+colour - `_test_palette_contrast` greps `ui/` and `scripts/sprites.gd` for a
+literal `Color(...)` and fails on one.
+
+Every element clears **WCAG 3:1** against the field, the bar for non-text
+graphical objects, and the suite asserts it rather than the README claiming it:
+
+| | hex | vs field |
+|---|---|---|
+| field | `#2b3140` | - |
+| team A helmet / body | `#ffa88c` | 6.95 : 1 / 3.68 : 1 |
+| team B helmet / body | `#8cc0ff` | 6.87 : 1 / 3.64 : 1 |
+| sandbags | `#d9bd8a` `#c4a875` | 7.18 : 1 / 5.70 : 1 |
+| sandbag top edge | `#f5e4bf` | 10.35 : 1 |
+| corpse | `#9aa3b5` | 5.12 : 1 |
+| bullets | `#fff0c0` | 11.43 : 1 |
+
+The **body** rows are the ones that matter and the ones that were wrong before:
+a soldier is a luminance sprite with the team colour multiplied in, so the torso
+is 0.72 of the tint. Ember and cyan both looked fine as swatches and both sank
+into a near-black field as men. The test checks the body, not the swatch.
+
+**Team A is red and team B is blue, in that order, and `war-sim` now matches.**
+The two builds had drifted - this one had A blue and B red, the canvas one had A
+ember and B cyan - which is a bad property for two implementations of one spec
+meant to be read side by side. Red against blue rather than red against cyan
+because it is the standard colour-blind-safe opposition, and the two sit at
+nearly equal luminance (0.512 vs 0.505, asserted) so neither side reads as the
+heavier.
+
+Before and after, composited by `sprites.gd --scene` through the same lens:
+`docs/palette-before.png` and `docs/palette-after.png`.
+
+**Not affected by the deadfall/camera fixes** that went into `pack-hunt-3d` and
+`pack-hunt-brains` the same day: this renderer is 2D throughout - `Node2D`,
+`MultiMeshInstance2D`, `_draw` - so there is no mesh winding to get wrong, no
+`StandardMaterial3D` to cull, no `DirectionalLight3D`, and no 3D frustum AABB to
+go stale. It was checked for all four and has none of them.
+
 `scripts/sprites.gd` generates the sheet from code and is committed with it:
 
 ```sh
 godot --headless --script res://scripts/sprites.gd
 godot --headless --script res://scripts/sprites.gd -- --preview /tmp/p.png --scene /tmp/s.png
+godot --headless --script res://scripts/sprites.gd -- --legacy --scene docs/palette-before.png
 ```
 
 It composes the image analytically rather than through any drawing API, because

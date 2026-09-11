@@ -22,6 +22,7 @@ const World := preload("res://scripts/world.gd")
 const Batch := preload("res://scripts/batch.gd")
 const D := preload("res://scripts/data.gd")
 const Field := preload("res://ui/field.gd")
+const Palette := preload("res://scripts/palette.gd")
 
 ## Room for the export shell's floating "<- Apps" pill.
 const BACK_LINK_GUTTER := 118.0
@@ -88,30 +89,30 @@ func _apply_theme() -> void:
 	var t := Theme.new()
 	t.default_font_size = 15
 	var btn := StyleBoxFlat.new()
-	btn.bg_color = Color(0.14, 0.16, 0.21)
-	btn.border_color = Color(1, 1, 1, 0.14)
+	btn.bg_color = Palette.UI_BUTTON
+	btn.border_color = Palette.UI_BORDER
 	btn.set_border_width_all(1)
 	btn.set_corner_radius_all(7)
 	btn.content_margin_left = 12; btn.content_margin_right = 12
 	btn.content_margin_top = 8; btn.content_margin_bottom = 8
 	var hov := btn.duplicate() as StyleBoxFlat
-	hov.bg_color = Color(0.20, 0.23, 0.30)
+	hov.bg_color = Palette.UI_BUTTON_HOVER
 	var prs := btn.duplicate() as StyleBoxFlat
-	prs.bg_color = Color(0.25, 0.42, 0.66)
+	prs.bg_color = Palette.UI_BUTTON_PRESSED
 	for cls in ["Button", "OptionButton", "MenuButton"]:
 		t.set_stylebox("normal", cls, btn)
 		t.set_stylebox("hover", cls, hov)
 		t.set_stylebox("pressed", cls, prs)
 		t.set_stylebox("focus", cls, StyleBoxEmpty.new())
-		t.set_color("font_color", cls, Color(0.90, 0.92, 0.96))
+		t.set_color("font_color", cls, Palette.UI_TEXT)
 	var panel := StyleBoxFlat.new()
-	panel.bg_color = Color(0.055, 0.063, 0.086, 0.94)
-	panel.border_color = Color(1, 1, 1, 0.11)
+	panel.bg_color = Color(Palette.UI_PANEL, 0.94)
+	panel.border_color = Palette.UI_BORDER_SOFT
 	panel.set_border_width_all(1)
 	panel.set_corner_radius_all(10)
 	panel.set_content_margin_all(12)
 	t.set_stylebox("panel", "PanelContainer", panel)
-	t.set_color("font_color", "Label", Color(0.84, 0.87, 0.92))
+	t.set_color("font_color", "Label", Palette.UI_TEXT)
 	theme = t
 
 
@@ -187,8 +188,8 @@ func _build_top_bar() -> void:
 	bar.set_anchors_preset(Control.PRESET_TOP_WIDE)
 	bar.offset_bottom = TOP_BAR_H
 	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0.04, 0.05, 0.07, 0.92)
-	sb.border_color = Color(1, 1, 1, 0.10)
+	sb.bg_color = Color(Palette.UI_BAR, 0.92)
+	sb.border_color = Palette.UI_BORDER_SOFT
 	sb.border_width_bottom = 1
 	sb.content_margin_left = BACK_LINK_GUTTER      # keep clear of the shell's back link
 	sb.content_margin_right = 10
@@ -259,7 +260,7 @@ func _toggle_mode() -> void:
 	_mode_btn.text = "Mode: Single" if _mode == "single" else "Mode: Simulate"
 	_stats_panel.visible = _mode == "single"
 	_sim_panel.visible = _mode == "simulate"
-	_field_holder.modulate = Color(1, 1, 1, 1.0 if _mode == "single" else 0.25)
+	_field_holder.modulate = Color(Palette.WHITE, 1.0 if _mode == "single" else 0.25)
 	_play_btn.visible = _mode == "single"
 	if _mode == "simulate":
 		_sim_active = false
@@ -331,7 +332,7 @@ func _fill_grid(grid: GridContainer, head: Array, rows: Array) -> void:
 	for h in head:
 		var l := Label.new()
 		l.text = String(h)
-		l.add_theme_color_override("font_color", Color(0.55, 0.60, 0.70))
+		l.add_theme_color_override("font_color", Palette.UI_MUTED)
 		l.add_theme_font_size_override("font_size", 12)
 		grid.add_child(l)
 	for r in rows:
@@ -467,7 +468,7 @@ func _refresh_sim_table() -> void:
 # ── setup drawer ──────────────────────────────────────────────────
 func _build_drawer() -> void:
 	_scrim = ColorRect.new()
-	_scrim.color = Color(0, 0, 0, 0.45)
+	_scrim.color = Palette.UI_SCRIM
 	_scrim.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_scrim.visible = false
 	_scrim.gui_input.connect(func(e: InputEvent) -> void:
@@ -515,7 +516,7 @@ func _rebuild_unit_editor() -> void:
 	var note := Label.new()
 	note.text = "The unit carries the personality. Every actor is that personality plus seeded jitter."
 	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	note.add_theme_color_override("font_color", Color(0.55, 0.60, 0.70))
+	note.add_theme_color_override("font_color", Palette.UI_MUTED)
 	note.add_theme_font_size_override("font_size", 12)
 	_unit_box.add_child(note)
 
